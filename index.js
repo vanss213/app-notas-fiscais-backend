@@ -1,103 +1,124 @@
-// index.js
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const fs = require('fs');
-const path = require('path');
-const PDFDocument = require('pdfkit');
-const db = require('./db'); // importa a conexão com o PostgreSQL
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const fs = require("fs");
+const path = require("path");
+const PDFDocument = require("pdfkit");
+const db = require("./db");
 
 const app = express();
-app.use(cors());
+
+// LIBERA O FRONT VITE (5173)
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
+}));
+
 app.use(bodyParser.json());
 
-// 📂 Torna a pasta /pdfs pública
-app.use('/pdfs', express.static(path.join(__dirname, 'pdfs')));
+// Pasta pública para PDFs
+const pdfDir = path.join(__dirname, "pdfs");
+if (!fs.existsSync(pdfDir)) fs.mkdirSync(pdfDir);
 
-// 🧠 Rota de teste (verifica se o servidor está ativo)
-app.get('/', (req, res) => {
-  res.send('✅ Servidor backend rodando!');
-});
+app.use("/pdfs", express.static(pdfDir));
 
-// 🧾 Rota para emitir nota fiscal e gerar PDF
-app.post('/api/notas', async (req, res) => {
+// ===============================
+// FUNÇÃO GERAR DATA
+// ===============================
+function dt(d) {
+  const dd = d.getDate().toString().padStart(2, "0");
+  const mm = (d.getMonth() + 1).toString().padStart(2, "0");
+  const yy = d.getFullYear();
+  return `${dd}/${mm}/${yy}`;
+}
+
+// ===============================
+// ROTA PRINCIPAL – EMITIR NFSe
+// ===============================
+app.post("/api/emitir-nfse", async (req, res) => {
   try {
-    const { emissor, destinatario, valor } = req.body;
+    const { cnpj_prestador, cnpj_tomador, descricao, valor } = req.body;
 
-    // Salva no banco
-    await db.query(
-      'INSERT INTO notas (emissor_cnpj, destinatario_cnpj, valor) VALUES ($1, $2, $3)',
-      [emissor, destinatario, valor]
+    if (!cnpj_prestador || !cnpj_tomador || !descricao || !valor) {
+      return res.status(400).json({ erro: "Dados incompletos." });
+    }
+
+    // Salvar no banco
+    const result = await db.query(
+      `INSERT INTO notas_focus (cnpj_prestador, cnpj_tomador, descricao, valor, status)
+       VALUES ($1, $2, $3, $4, 'emitida') RETURNING id`,
+      [cnpj_prestador, cnpj_tomador, descricao, valor]
     );
 
-    // Garante que a pasta /pdfs exista
-    const dir = path.join(__dirname, 'pdfs');
-    fs.mkdirSync(dir, { recursive: true });
+    const notaId = result.rows[0].id;
 
-    // Gera PDF
-    const fileName = `nota-${Date.now()}.pdf`;
-    const filePath = path.join(dir, fileName);
-    const doc = new PDFDocument();
-    const stream = fs.createWriteStream(filePath);
+    // Criar nome do PDF
+    const pdfName = `nfse_${notaId}.pdf`;
+    const pdfPath = path.join(pdfDir, pdfName);
+
+    // GERAR PDF
+    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    const stream = fs.createWriteStream(pdfPath);
     doc.pipe(stream);
 
-    doc.fontSize(20).text('NOTA FISCAL', { align: 'center' });
+    // --- Cabeçalho ---
+    doc.fontSize(22).text("NOTA FISCAL DE SERVIÇO", { align: "center" });
     doc.moveDown();
-    doc.fontSize(12).text(`Emissor: ${emissor}`);
-    doc.text(`Destinatário: ${destinatario}`);
-    doc.text(`Valor: R$ ${valor}`);
+
+    doc.fontSize(12).text(`Data: ${dt(new Date())}`);
+    doc.moveDown();
+
+    // --- Dados Prestador ---
+    doc.fontSize(14).text("PRESTADOR", { underline: true });
+    doc.text(`CNPJ: ${cnpj_prestador}`);
+    doc.moveDown();
+
+    // --- Dados Tomador ---
+    doc.fontSize(14).text("TOMADOR", { underline: true });
+    doc.text(`CNPJ: ${cnpj_tomador}`);
+    doc.moveDown();
+
+    // --- Serviço ---
+    doc.fontSize(14).text("DESCRIÇÃO DO SERVIÇO", { underline: true });
+    doc.fontSize(12).text(descricao);
+    doc.moveDown();
+
+    // --- Valor ---
+    doc.fontSize(16).fillColor("#0057ff").text(`VALOR: R$ ${valor}`);
+    doc.fillColor("black");
+
     doc.end();
 
-    stream.on('finish', () => {
-      res.json({
-        message: '✅ Nota fiscal emitida com sucesso!',
-        pdf: `/pdfs/${fileName}`
+    stream.on("finish", () => {
+      return res.json({
+        ok: true,
+        dados: {
+          id: notaId,
+          caminho_pdf: `/pdfs/${pdfName}`
+        }
       });
     });
-  } catch (err) {
-    console.error('❌ Erro ao gerar nota:', err);
-    res.status(500).json({ error: 'Erro ao gerar nota fiscal.' });
+
+  } catch (erro) {
+    console.error("❌ ERRO AO EMITIR:", erro);
+    res.status(500).json({ erro: "Erro ao emitir nota." });
   }
 });
 
-// 🚀 Inicializa o servidor
+// ===============================
+// INICIAR SERVIDOR
+// ===============================
 app.listen(3000, () => {
-  console.log('🚀 Servidor rodando na porta 3000');
+  console.log("✔ Backend rodando em http://localhost:3000");
 });
-// rota para emitir nota fiscal real via NFE.io
-app.post('/api/emitir-nfe', async (req, res) => {
-  const { emissor, destinatario, valor } = req.body;
 
-  try {
-    const response = await fetch('https://api.nfe.io/v1/companies/{SEU_ID_EMPRESA}/serviceinvoices', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': 'Basic SUA_CHAVE_API_AQUI' // use sua API Key da NFE.io
-      },
-      body: JSON.stringify({
-        cityServiceCode: "2690", // código de serviço (ex: transporte)
-        description: "Serviço de transporte de carga",
-        servicesAmount: valor,
-        borrower: {
-          federalTaxNumber: destinatario.replace(/[^\d]/g, ""), // CNPJ do cliente
-          name: "Cliente Oliveira Transportes"
-        },
-        borrowerEmail: "cliente@email.com"
-      })
-    });
 
-    const data = await response.json();
-    console.log("✅ Retorno da NFE.io:", data);
 
-    res.json({
-      message: "✅ Nota fiscal MEI emitida com sucesso!",
-      nf_number: data.number,
-      pdf: data.pdf.url
-    });
-  } catch (err) {
-    console.error("Erro ao emitir nota fiscal real:", err);
-    res.status(500).json({ error: "Falha na emissão da NF-e MEI." });
-  }
-});
+
+
+
+
+
+
+
